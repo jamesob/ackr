@@ -327,7 +327,10 @@ def ack(msg_file: str):
             """)
 
     print()
+
+    print('-' * 80)
     print(out)
+    print('-' * 80)
 
     if _sh('which xclip'):
         t = pipes.Template()
