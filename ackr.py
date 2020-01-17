@@ -46,6 +46,7 @@ import sys
 import os
 import textwrap
 import pipes
+import platform
 from typing import NamedTuple
 from pathlib import Path
 from subprocess import run, PIPE
@@ -252,10 +253,30 @@ def ack(msg_file: str):
     ackr_dir = _get_current_ackr_dir()
     msg_path = Path(ackr_dir) / 'ack_message.txt'
     signed_path = Path(ackr_dir) / 'ack_message.asc'
-
     tag = _get_current_ackr_tag()
     tag_url = f"https://github.com/{ACKR_GH_USER}/bitcoin/tree/{tag}"
-    header_txt = f"ACK {head_sha} ([`{ACKR_GH_USER}/{tag}`]({tag_url}))\n"
+
+    confdata = _parse_configure_log()
+    compiler_v = confdata['clang_version'] or confdata['gcc_version']
+
+    header_txt = textwrap.dedent(f"""ACK {head_sha} ([`{ACKR_GH_USER}/{tag}`]({tag_url}))
+
+        <details><summary>Show platform data</summary>
+        <p>
+
+        ```
+        Tested on {platform.platform()}
+
+        Configured with {confdata['configure_command']}
+
+        Compiled with {confdata['cxx']} {confdata['cxxflags']} i
+
+        Compiler version: {compiler_v}
+        ```
+
+        </p></details>
+
+        """)
 
     if msg_file == '-':
         msg = sys.stdin.read()
@@ -281,23 +302,29 @@ def ack(msg_file: str):
     if not signing_key:
         raise RuntimeError("you need to configure git's user.signingkey")
 
-    signature = _sh(
-        f'gpg -u {signing_key} -o {signed_path} --clearsign {msg_path}',
-        check=True)
+    signature = None
+    try:
+        signature = _sh(
+            f'gpg -u {signing_key} -o {signed_path} --clearsign {msg_path}',
+            check=True)
+    except Exception:
+        print(f'GPG signing with key {signing_key} failed!', file=sys.stderr)
 
     out = msg
-    out += textwrap.dedent("""
-        <details><summary>Show signature data</summary>
-        <p>
 
-        ```
-        """)
-    out += signed_path.read_text()
-    out += textwrap.dedent("""
-        ```
+    if signature:
+        out += textwrap.dedent("""
+            <details><summary>Show signature data</summary>
+            <p>
 
-        </p></details>
-        """)
+            ```
+            """)
+        out += signed_path.read_text()
+        out += textwrap.dedent("""
+            ```
+
+            </p></details>
+            """)
 
     print()
     print(out)
@@ -348,6 +375,52 @@ def _get_current_ackr_dir() -> str:
                  n.name.startswith('{}.'.format(i))]
 
     return dirname
+
+
+def _parse_configure_log() -> dict:
+    """
+    Inspect the config.log file from the bitcoin src dir.
+    """
+    out = {
+        'configure_command': '',
+        'clang_version': '',
+        'gcc_version': '',
+        'cxx': '',
+        'cxxflags': '',
+    }
+    configlog = Path('./config.log')
+    if not configlog.is_file():
+        print("No config.log found at %s", configlog, file=sys.stderr)
+        return {}
+
+    lines = configlog.read_text().splitlines()
+
+    def extract_val(line) -> str:
+        return line.split('=', 1)[-1].replace("'", '')
+
+    for line in lines:
+        if line.startswith("  $") and 'configure ' in line:
+            out['configure_command'] = line.strip('  $')
+
+        elif line.startswith('clang version'):
+            out['clang_version'] = line
+
+        elif line.startswith('g++ '):
+            out['gcc_version'] = line
+
+        elif line.startswith('CXX='):
+            out['cxx'] = extract_val(line)
+
+        elif line.startswith('CXXFLAGS='):
+            out['cxxflags'] += extract_val(line)
+
+        elif '_CXXFLAGS=' in line:
+            val = extract_val(line)
+            if val:
+                out['cxxflags'] += val + ' '
+
+    return out
+
 
 
 def build_parser():
