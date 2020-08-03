@@ -86,8 +86,10 @@ def _github_api(path: str) -> dict:
     return json.loads(resp.read().decode())
 
 
-def _fetch_upstream():
-    run(shlex.split(f"git fetch {UPSTREAM}")).check_returncode()
+def _fetch_upstream(prnum: int):
+    run(shlex.split(
+        f"git fetch upstream +refs/pull/{prnum}/head:refs/upstream/upstream/pr/{prnum}"
+    )).check_returncode()
 
 
 def _sh(cmd: str, check: bool = False) -> str:
@@ -184,7 +186,7 @@ def pull(prnum: int):
     - generate a diff relative to the base of the branch and save it,
     - generate a review checklist with all commits.
     """
-    _fetch_upstream()
+    _fetch_upstream(prnum)
     pr = PRData.from_json_dict(
         _github_api("/repos/bitcoin/bitcoin/pulls/" + str(prnum)))
     pr.ackr_path.mkdir(exist_ok=True)
