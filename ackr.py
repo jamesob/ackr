@@ -232,6 +232,19 @@ def print_tag_update(tag: str, one, two):
     print(
         f"[`{tag}.{one}`]({base + one}) -> [`{tag}.{two}`]({base + two})")
 
+    print(
+        f"""
+<details><summary>Show range-diff</summary>
+
+```sh
+$ git range-diff master {tag}.{one} {tag}.{two}
+
+{_sh(f'git range-diff master {tag}.{one} {tag}.{two}')}
+```
+
+</details>
+        """)
+
 
 def edit_review_notes(tag: t.Optional[str]):
     """Edit the review checklist and notes file for a certain PR revision."""
