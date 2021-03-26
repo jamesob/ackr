@@ -1,4 +1,4 @@
-#!/usr/bin/env python3.8
+#!/usr/bin/env python3
 # vi: filetype=python sw=4
 """
 A small script that assists with reviewing bitcoin/bitcoin PRs.
@@ -498,7 +498,8 @@ def check_remotes():
 
     if '[remote "upstream"]' not in conf:
         die(
-            "Missing upstream remote; run `git remote add upstream git@github.com:bitcoin/bitcoin"
+            "Missing upstream remote; run "
+            "`git remote add upstream git@github.com:bitcoin/bitcoin"
         )
 
 
