@@ -503,7 +503,7 @@ def _parse_configure_log() -> dict:
         if line.startswith("  $") and "configure " in line:
             out["configure_command"] = line.strip("  $")
 
-        elif line.startswith("clang version"):
+        elif "clang version" in line:
             out["clang_version"] = line
 
         elif line.startswith("g++ "):
