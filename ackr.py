@@ -35,6 +35,7 @@ TODO:
 
 import argparse
 import datetime
+import getpass
 import json
 import urllib.request
 import logging
@@ -51,27 +52,50 @@ from typing import NamedTuple
 from pathlib import Path
 from subprocess import run, PIPE
 
+from clii import App, Arg
+
+
+cli = App(description=__doc__)
+cli.add_arg("--verbose", "-v", action="store_true", default=False)
+
+
+ACKR_CONF_PATH = Path.home() / '.config' / 'ackr'
+
+
+def get_conf(key: str, envkey: str, default: t.Any):
+    """
+    Return a configuration value first from the environment, then from config file.
+    """
+    if getattr(get_conf, '__cached_conf', None) is None:
+        readconf = {}
+        if ACKR_CONF_PATH.exists():
+            readconf = json.loads(ACKR_CONF_PATH.read_text())
+        get_conf.__cached_conf = readconf
+
+    conffile: dict = get_conf.__cached_conf
+
+    return os.path.expanduser(os.environ.get(envkey, conffile.get(key, default)))
+
 
 # Where ackr state will be stored.
-ACKR_DIR = Path.home() / ".ackr"
+ACKR_DIR = Path(get_conf("storage_dir", "ACKR_DIR", Path.home() / ".ackr"))
 
 # Used to generate references to tags for your PRs.
-ACKR_GH_USER = os.environ.get("ACKR_GH_USER", "jamesob")
+ACKR_GH_USER = get_conf("ghuser", "ACKR_GH_USER", "jamesob")
 
 # Your preferred text editor.
-EDITOR = os.environ.get("EDITOR", "nvim")
+EDITOR = os.environ.get("EDITOR", "vim")
 
 # The git remote name asociated with the `bitcoin/bitcoin` upstream.
-UPSTREAM = os.environ.get("ACKR_UPSTREAM", "upstream")
+UPSTREAM = get_conf("upstream_remote_name", "ACKR_UPSTREAM", "upstream")
 
-if os.environ.get("ACKR_DIR"):
-    ACKR_DIR = Path(os.path.expandvars(os.environ["ACKR_DIR"]))
-
+# Symlinks to tags are stored ordered here by date for convenient reference.
 BY_DATE_DIR = ACKR_DIR / "by-date"
 
 log = logging.getLogger(__name__)
 logging.basicConfig()
 
+# Toggled below with the `-v` flag.
 DEBUG = False
 
 
@@ -87,11 +111,9 @@ def _github_api(path: str) -> dict:
 
 
 def _fetch_upstream(prnum: int):
-    run(
-        shlex.split(
-            f"git fetch upstream +refs/pull/{prnum}/head:refs/upstream/pr/{prnum}"
-        )
-    ).check_returncode()
+    _sh(
+        f"git fetch {UPSTREAM} master +refs/pull/{prnum}/head:refs/{UPSTREAM}/pr/{prnum}",
+        check=True)
 
 
 def _sh(cmd: str, check: bool = False) -> str:
@@ -157,11 +179,10 @@ class TipData(NamedTuple):
     def from_prdata(cls, prdata: PRData):
         ref = "{}/pr/{}".format(UPSTREAM, prdata.num)
         tip_sha = _sh("git rev-parse {}".format(ref))
-        earliest_commit_sha = (
-            _sh("git log --no-color {}/master..{} --oneline".format(UPSTREAM, ref))
-            .splitlines()[-1]
-            .split()[0]
-        )
+        gotlog = _sh(
+            "git log --no-color {}/master..{} --oneline".format(UPSTREAM, ref),
+            check=True)
+        earliest_commit_sha = gotlog.splitlines()[-1] .split()[0]
         base_sha = _sh("git rev-parse {}~1".format(earliest_commit_sha))
         if len(base_sha) > 40:
             raise RuntimeError(f"base_sha is fucked: {base_sha[:100]}")
@@ -185,6 +206,7 @@ class TipData(NamedTuple):
         )
 
 
+@cli.cmd
 def pull(prnum: int):
     """
     Given a PR number, retrieve the code from Github and do a few things:
@@ -235,6 +257,7 @@ def pull(prnum: int):
     )
 
 
+@cli.cmd
 def print_pr_data(prnum: int):
     """Print the Github API data associated with a PR."""
     pprint.pprint(_github_api("/repos/bitcoin/bitcoin/pulls/" + str(prnum)))
@@ -260,8 +283,14 @@ $ git range-diff master {tag}.{one} {tag}.{two}
     )
 
 
-def edit_review_notes(tag: t.Optional[str]):
-    """Edit the review checklist and notes file for a certain PR revision."""
+@cli.cmd
+def review(tag: t.Optional[str]):
+    """
+    Edit the review checklist and notes file for a certain PR revision.
+
+    Args:
+        tag: defaults to the current ackr tag
+    """
     rev_dir = _get_current_ackr_dir()
     if not rev_dir:
         die(f"revdir not detected for {tag}")
@@ -271,12 +300,19 @@ def edit_review_notes(tag: t.Optional[str]):
     print(checklist_path)
 
 
+@cli.cmd
 def interdiff(tag: str, seq_before=None, seq_after=None):
     """Show the interdiff between two separate PR tips."""
 
 
-def ack(msg_file: str):
-    """Print a signed ACK message and upload it to opentimestamps."""
+@cli.cmd
+def ack(msg_file: str = ''):
+    """
+    Print a signed ACK message and upload it to opentimestamps.
+
+    Args:
+        msg_file:
+    """
     head_sha = _sh("git rev-parse HEAD", check=True)
     msg = ""
     ackr_dir = _get_current_ackr_dir()
@@ -457,33 +493,6 @@ def _parse_configure_log() -> dict:
     return out
 
 
-def build_parser():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("-vv", "--verbose", action="store_true")
-    subparsers = parser.add_subparsers(dest="cmd")
-
-    tags_parser = subparsers.add_parser("pull", help=pull.__doc__)
-    tags_parser.add_argument("pr_num", nargs="?")
-
-    pr_data_p = subparsers.add_parser("prdata", help=print_pr_data.__doc__)
-    pr_data_p.add_argument("pr_num", nargs="?")
-
-    tag_update_p = subparsers.add_parser("tagupdate", help=print_tag_update.__doc__)
-    tag_update_p.add_argument("tag")
-    tag_update_p.add_argument("one")
-    tag_update_p.add_argument("two")
-
-    tag_update_p = subparsers.add_parser("review", help=edit_review_notes.__doc__)
-    tag_update_p.add_argument("tag", nargs="?", help="defaults to current branch")
-
-    ack_p = subparsers.add_parser("ack", help=ack.__doc__)
-    ack_p.add_argument(
-        "msg_file", nargs="?", help="defaults to creation in editor. pass - for stdin."
-    )
-
-    return parser
-
-
 def die(msg: str):
     print(msg, file=sys.stderr)
     sys.exit(1)
@@ -496,16 +505,17 @@ def check_remotes():
 
     conf = confpath.read_text()
 
-    if '[remote "upstream"]' not in conf:
+    if f'[remote "{UPSTREAM}"]' not in conf:
         die(
             "Missing upstream remote; run "
-            "`git remote add upstream git@github.com:bitcoin/bitcoin"
+            f"`git remote add {UPSTREAM} https://github.com/bitcoin/bitcoin.git"
         )
 
 
 if __name__ == "__main__":
-    args = build_parser().parse_args()
     _ensure_location()
+    cli.parse_for_run()
+    DEBUG = cli.args.verbose
 
     if not ACKR_DIR.exists():
         print("Created state directory at {}".format(ACKR_DIR))
@@ -516,18 +526,4 @@ if __name__ == "__main__":
         BY_DATE_DIR.mkdir()
 
     check_remotes()
-
-    DEBUG = args.verbose
-
-    if args.cmd == "pull":
-        pull(int(args.pr_num))
-    elif args.cmd == "prdata":
-        print_pr_data(int(args.pr_num))
-    elif args.cmd == "tagupdate":
-        print_tag_update(args.tag, args.one, args.two)
-    elif args.cmd == "review":
-        edit_review_notes(args.tag)
-    elif args.cmd == "ack":
-        ack(args.msg_file)
-    else:
-        print("Unrecognized args")
+    cli.run()
