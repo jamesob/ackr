@@ -301,8 +301,38 @@ def review(tag: t.Optional[str]):
 
 
 @cli.cmd
-def interdiff(tag: str, seq_before=None, seq_after=None):
-    """Show the interdiff between two separate PR tips."""
+def interdiff():
+    """
+    Show the range-diff between the latest and penultimate tags.
+    """
+    curr_tag = _get_current_ackr_tag()
+    if not curr_tag:
+        die("couldn't find current ackr tag")
+        return
+
+    versions = _get_versions()
+    earlier_versions = versions[versions.index(curr_tag) + 1:]
+
+    if not earlier_versions:
+        die(f"no earlier versions to compare to in {versions}")
+        return
+
+    prev_tag = earlier_versions[0]
+
+    input(f"Comparing {curr_tag} to {prev_tag} [enter] ")
+    run(f"git range-diff {UPSTREAM}/master {prev_tag} {curr_tag}", shell=True)
+
+def _get_versions():
+    curr_tag = _get_current_ackr_tag()
+    prefix = curr_tag.split('.')[0]
+    all_tags = _sh(f'git tag | grep "^{prefix}\."').splitlines()
+    return sorted(all_tags, reverse=True)
+
+
+@cli.cmd
+def versions():
+    for v in _get_versions():
+        print(v)
 
 
 @cli.cmd
