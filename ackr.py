@@ -512,7 +512,7 @@ def check_remotes():
         )
 
 
-if __name__ == "__main__":
+def main():
     _ensure_location()
     cli.parse_for_run()
     DEBUG = cli.args.verbose
@@ -527,3 +527,7 @@ if __name__ == "__main__":
 
     check_remotes()
     cli.run()
+
+
+if __name__ == "__main__":
+    main()
