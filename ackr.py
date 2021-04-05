@@ -33,13 +33,10 @@ TODO:
 
 """
 
-import argparse
 import datetime
-import getpass
 import json
 import urllib.request
 import logging
-import shlex
 import pprint
 import typing as t
 import re
@@ -346,6 +343,7 @@ def ack(msg_file: str = ''):
     head_sha = _sh("git rev-parse HEAD", check=True)
     msg = ""
     ackr_dir = _get_current_ackr_dir()
+    assert ackr_dir
     msg_path = Path(ackr_dir) / "ack_message.txt"
     signed_path = Path(ackr_dir) / "ack_message.asc"
     tag = _get_current_ackr_tag()
@@ -354,26 +352,7 @@ def ack(msg_file: str = ''):
     confdata = _parse_configure_log()
     compiler_v = confdata["clang_version"] or confdata["gcc_version"]
 
-    header_txt = textwrap.dedent(
-        f"""ACK {head_sha} ([`{ACKR_GH_USER}/{tag}`]({tag_url}))
-
-        <details><summary>Show platform data</summary>
-        <p>
-
-        ```
-        Tested on {platform.platform()}
-
-        Configured with {confdata['configure_command']}
-
-        Compiled with {confdata['cxx']} {confdata['cxxflags']} i
-
-        Compiler version: {compiler_v}
-        ```
-
-        </p></details>
-
-        """
-    )
+    header_txt = f"ACK {head_sha} ([`{ACKR_GH_USER}/{tag}`]({tag_url}))\n\n"
 
     if msg_file == "-":
         msg = sys.stdin.read()
@@ -418,13 +397,27 @@ def ack(msg_file: str = ''):
             """
         )
         out += signed_path.read_text()
-        out += textwrap.dedent(
-            """
-            ```
+        out += f"""
+```
 
-            </p></details>
-            """
-        )
+</p></details>
+
+<details><summary>Show platform data</summary>
+<p>
+
+```
+Tested on {platform.platform()}
+
+Configured with {confdata['configure_command']}
+
+Compiled with {confdata['cxx']} {confdata['cxxflags']} i
+
+Compiler version: {compiler_v}
+```
+
+</p></details>
+
+"""
 
     print()
 
@@ -442,10 +435,11 @@ def ack(msg_file: str = ''):
         print()
         print("Signed ACK message copied to clipboard")
 
-    print(f"\nRemember to run\n\n  git push origin {tag}")
+    print(f"\nRunning git push origin {tag}")
+    _sh(f"git push origin {tag}")
 
 
-def _get_current_ackr_tag() -> str:
+def _get_current_ackr_tag() -> t.Optional[str]:
     """Get the ackr tag currently associated with the repo's HEAD."""
     tags = _sh("git name-rev --tags --name-only $(git rev-parse HEAD)").split()
     ackr_tags = [t for t in tags if "ackr/" in t]
@@ -457,7 +451,7 @@ def _get_current_ackr_tag() -> str:
     return ackr_tags[0]
 
 
-def _get_current_ackr_dir() -> str:
+def _get_current_ackr_dir() -> t.Optional[str]:
     """Get the ackr state dir associated with the current revision."""
     tag = _get_current_ackr_tag()
 
@@ -545,6 +539,7 @@ def check_remotes():
 def main():
     _ensure_location()
     cli.parse_for_run()
+    global DEBUG
     DEBUG = cli.args.verbose
 
     if not ACKR_DIR.exists():
