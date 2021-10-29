@@ -49,7 +49,7 @@ from typing import NamedTuple
 from pathlib import Path
 from subprocess import run, PIPE
 
-from clii import App, Arg
+from clii import App
 
 
 cli = App(description=__doc__)
@@ -212,6 +212,7 @@ def pull(prnum: int):
     - generate a diff relative to the base of the branch and save it,
     - generate a review checklist with all commits.
     """
+    _sh("git fetch --all")
     _fetch_upstream(prnum)
     pr = PRData.from_json_dict(
         _github_api("/repos/bitcoin/bitcoin/pulls/" + str(prnum))
@@ -219,12 +220,19 @@ def pull(prnum: int):
     pr.ackr_path.mkdir(exist_ok=True)
     tip = TipData.from_prdata(pr)
 
+    def create_tag():
+        if not _sh("git tag | grep {}".format(tip.ackr_tag)).strip():
+            _sh("git tag {} {}".format(tip.ackr_tag, tip.tip_sha))
+            print("Tagged {} with {}".format(tip.tip_sha, tip.ackr_tag))
+            _sh("git push --tags")
+
     if DEBUG:
         print("Latest tip is {}".format(tip.tip_sha))
         print("Existing tips found: {}".format(pr.existing_tips()))
 
     if tip.tip_sha in pr.existing_tips():
         print("PR up to date ({})".format(tip.tip_sha[:8]))
+        create_tag()
         return
 
     tip.ackr_path.mkdir()
@@ -239,19 +247,22 @@ def pull(prnum: int):
     # Create a symlink to populate the by-date directory.
     _sh(f"ln -rs {tip.ackr_path} {ln_loc}")
 
-    _sh("git tag {} {}".format(tip.ackr_tag, tip.tip_sha))
-    print("Tagged {} with {}".format(tip.tip_sha, tip.ackr_tag))
+    create_tag()
     (tip.ackr_path / "pr.json").write_text(json.dumps(pr.json_data, indent=2))
     (tip.ackr_path / "HEAD").write_text(tip.tip_sha)
     (tip.ackr_path / "base.diff").write_text(
         _sh("git diff {} {}".format(tip.base_sha, tip.tip_sha))
     )
-    (tip.ackr_path / "review-checklist.md").write_text(
-        _sh(
-            "git log --no-color --format=oneline --abbrev-commit --no-merges {} "
-            "^master | tac | sed -e 's/^/- [ ] /g'".format(tip.tip_sha)
-        )
+    checklist = _sh(
+        "git log --no-color --format=oneline --abbrev-commit --no-merges {} "
+        "^upstream/master | tac | sed -e 's/^/- [ ] /g'".format(tip.tip_sha)
     )
+    (tip.ackr_path / "review-checklist.md").write_text(checklist)
+
+    print()
+    print(checklist)
+    print()
+    _sh(f"git checkout {tip.ackr_tag}")
 
 
 @cli.cmd
@@ -260,7 +271,8 @@ def print_pr_data(prnum: int):
     pprint.pprint(_github_api("/repos/bitcoin/bitcoin/pulls/" + str(prnum)))
 
 
-def print_tag_update(tag: str, one, two):
+@cli.cmd
+def print_tag_update(tag: str, one: str, two: str):
     """Print a message including links to a tagged update for your branch."""
     base = f"https://github.com/{ACKR_GH_USER}/bitcoin/tree/{tag}."
     print(f"[`{tag}.{one}`]({base + one}) -> [`{tag}.{two}`]({base + two})")
@@ -281,16 +293,14 @@ $ git range-diff master {tag}.{one} {tag}.{two}
 
 
 @cli.cmd
-def review(tag: t.Optional[str]):
+def review():
     """
     Edit the review checklist and notes file for a certain PR revision.
-
-    Args:
-        tag: defaults to the current ackr tag
     """
     rev_dir = _get_current_ackr_dir()
+    assert rev_dir
     if not rev_dir:
-        die(f"revdir not detected for {tag}")
+        die(f"revdir not detected for HEAD")
 
     checklist_path = rev_dir / "review-checklist.md"
     run(f"{EDITOR} {checklist_path}", shell=True)
