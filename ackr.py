@@ -86,6 +86,8 @@ EDITOR = os.environ.get("EDITOR", "vim")
 # The git remote name asociated with the `bitcoin/bitcoin` upstream.
 UPSTREAM = get_conf("upstream_remote_name", "ACKR_UPSTREAM", "upstream")
 
+PAGER = get_conf("pager", "PAGER", "less")
+
 # Symlinks to tags are stored ordered here by date for convenient reference.
 BY_DATE_DIR = ACKR_DIR / "by-date"
 
@@ -212,7 +214,7 @@ def pull(prnum: int):
     - generate a diff relative to the base of the branch and save it,
     - generate a review checklist with all commits.
     """
-    _sh("git fetch --all")
+    _sh("git fetch --all", check=True)
     _fetch_upstream(prnum)
     pr = PRData.from_json_dict(
         _github_api("/repos/bitcoin/bitcoin/pulls/" + str(prnum))
@@ -297,10 +299,9 @@ def review():
     """
     Edit the review checklist and notes file for a certain PR revision.
     """
-    rev_dir = _get_current_ackr_dir()
-    assert rev_dir
+    rev_dir = _get_current_rev_dir()
     if not rev_dir:
-        die(f"revdir not detected for HEAD")
+        die("revdir not detected for HEAD")
 
     checklist_path = rev_dir / "review-checklist.md"
     run(f"{EDITOR} {checklist_path}", shell=True)
@@ -308,7 +309,14 @@ def review():
 
 
 @cli.cmd
-def interdiff():
+def revs():
+    """Print the rev dirs for the current tag in descending order."""
+    for i in _get_ordered_rev_dirs():
+        print(i)
+
+
+@cli.cmd
+def rangediff():
     """
     Show the range-diff between the latest and penultimate tags.
     """
@@ -329,6 +337,17 @@ def interdiff():
     input(f"Comparing {curr_tag} to {prev_tag} [enter] ")
     run(f"git range-diff {UPSTREAM}/master {prev_tag} {curr_tag}", shell=True)
 
+
+@cli.cmd
+def interdiff():
+    """
+    Show the diff between ackr's recorded `base.diff` for this tag and the one preceding it.
+    """
+    [rev, prev_rev, *_] = _get_ordered_rev_dirs()
+    input(f"Comparing {prev_rev} to {rev} [enter] ")
+    run(f"diff -u {prev_rev}/base.diff {rev}/base.diff | {PAGER}", shell=True)
+
+
 def _get_versions():
     curr_tag = _get_current_ackr_tag()
     prefix = curr_tag.split('.')[0]
@@ -337,7 +356,8 @@ def _get_versions():
 
 
 @cli.cmd
-def versions():
+def tags():
+    """Print the git-ackr tags for the current PR in descending order."""
     for v in _get_versions():
         print(v)
 
@@ -352,8 +372,7 @@ def ack(msg_file: str = ''):
     """
     head_sha = _sh("git rev-parse HEAD", check=True)
     msg = ""
-    ackr_dir = _get_current_ackr_dir()
-    assert ackr_dir
+    ackr_dir = _get_current_rev_dir()
     msg_path = Path(ackr_dir) / "ack_message.txt"
     signed_path = Path(ackr_dir) / "ack_message.asc"
     tag = _get_current_ackr_tag()
@@ -449,37 +468,42 @@ Compiler version: {compiler_v}
     _sh(f"git push origin {tag}")
 
 
-def _get_current_ackr_tag() -> t.Optional[str]:
+def _get_current_ackr_tag() -> str:
     """Get the ackr tag currently associated with the repo's HEAD."""
     tags = _sh("git name-rev --tags --name-only $(git rev-parse HEAD)").split()
     ackr_tags = [t for t in tags if "ackr/" in t]
 
     if not ackr_tags:
-        print("HEAD not recognized by ackr (tags: {})".format(tags))
-        return None
+        die("HEAD not recognized by ackr (tags: {})".format(tags))
 
+    assert ackr_tags[0]
     return ackr_tags[0]
 
 
-def _get_current_ackr_dir() -> t.Optional[str]:
+def _get_current_pr_num() -> str:
+    tag = _get_current_ackr_tag().split("ackr/")[-1]
+    num, *_ = tag.split(".")
+    return num
+
+
+def _get_current_tag_data() -> t.Tuple[int, int, str, str]:
+    return _get_current_ackr_tag().split('ackr/')[-1].split('.')
+
+
+def _get_current_rev_dir() -> str:
     """Get the ackr state dir associated with the current revision."""
-    tag = _get_current_ackr_tag()
+    num, i, *_ = _get_current_tag_data()
+    [pr_dir] = [n for n in ACKR_DIR.iterdir() if n.name.startswith("{}.".format(num))]
+    [rev_dir] = [n for n in pr_dir.iterdir() if n.name.startswith("{}.".format(i))]
 
-    if not tag:
-        return None
+    return rev_dir
 
-    tag = tag.split("ackr/")[-1]
-    num, i, author, title = tag.split(".")
-    ackr_folder = "{}.{}.{}".format(num, author, title)
-    ackr_dir = ACKR_DIR / ackr_folder
 
-    if not ackr_dir.exists():
-        print("No ackr data for {}".format(ackr_folder))
-        return None
-
-    [dirname] = [n for n in ackr_dir.iterdir() if n.name.startswith("{}.".format(i))]
-
-    return dirname
+def _get_ordered_rev_dirs(num: t.Optional[str] = None) -> str:
+    """Get the ackr state dir associated with the current revision."""
+    num = num or _get_current_pr_num()
+    [pr_dir] = [n for n in ACKR_DIR.iterdir() if n.name.startswith("{}.".format(num))]
+    return list(sorted(pr_dir.iterdir(), reverse=True, key=str))
 
 
 def _parse_configure_log() -> dict:
