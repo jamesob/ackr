@@ -42,12 +42,14 @@ import typing as t
 import re
 import sys
 import os
+import threading
 import textwrap
 import pipes
 import platform
 from typing import NamedTuple
 from pathlib import Path
-from subprocess import run, PIPE
+import subprocess
+from subprocess import run
 
 from clii import App
 
@@ -56,14 +58,14 @@ cli = App(description=__doc__)
 cli.add_arg("--verbose", "-v", action="store_true", default=False)
 
 
-ACKR_CONF_PATH = Path.home() / '.config' / 'ackr'
+ACKR_CONF_PATH = Path.home() / ".config" / "ackr"
 
 
 def get_conf(key: str, envkey: str, default: t.Any):
     """
     Return a configuration value first from the environment, then from config file.
     """
-    if getattr(get_conf, '__cached_conf', None) is None:
+    if getattr(get_conf, "__cached_conf", None) is None:
         readconf = {}
         if ACKR_CONF_PATH.exists():
             readconf = json.loads(ACKR_CONF_PATH.read_text())
@@ -98,9 +100,97 @@ logging.basicConfig()
 DEBUG = False
 
 
+# 8 bit Color
+###############################################################################
+#
+# TODO this color stuff was taken from some Github page; track it down and credit
+# the authos.
+
+
+def esc(*codes: t.Union[int, str]) -> str:
+    """Produces an ANSI escape code from a list of integers
+    :rtype: text_type
+    """
+    return t_("\x1b[{}m").format(t_(";").join(t_(str(c)) for c in codes))
+
+
+def t_(b: t.Union[bytes, t.Any]) -> str:
+    """ensure text type"""
+    if isinstance(b, bytes):
+        return b.decode()
+    return b
+
+
+def conn_line(msg: str) -> str:
+    return green(bold(" ○  ")) + msg
+
+
+def make_color(start, end: str) -> t.Callable[[str], str]:
+    def color_func(s: str) -> str:
+        if not sys.stdout.isatty():
+            return s
+
+        # render
+        return start + t_(s) + end
+
+    return color_func
+
+
+FG_END = esc(39)
+red = make_color(esc(31), FG_END)
+green = make_color(esc(32), FG_END)
+yellow = make_color(esc(33), FG_END)
+blue = make_color(esc(34), FG_END)
+cyan = make_color(esc(36), FG_END)
+bold = make_color(esc(1), esc(22))
+
+
+class OutputStreamer(threading.Thread):
+    """
+    Allow streaming and capture of output from run processes.
+
+    This mimics the file interface and can be passed to
+    subprocess.Popen({stdout,stderr}=...).
+    """
+
+    def __init__(
+        self, *, is_stdout: bool = True, capture: bool = True, quiet: bool = False
+    ):
+        super().__init__()
+        self.daemon = False
+        self.fd_read, self.fd_write = os.pipe()
+        self.pipe_reader = os.fdopen(self.fd_read)
+        self.start()
+        self.capture = capture
+        self.lines = []
+        self.is_stdout = is_stdout
+        self.quiet = quiet
+
+    def fileno(self):
+        return self.fd_write
+
+    def render_line(self, line) -> str:
+        if self.is_stdout:
+            return f"    {blue(line)}"
+        else:
+            return f"    {red(line)}"
+
+    def run(self):
+        for line in iter(self.pipe_reader.readline, ""):
+            if not self.quiet:
+                print(self.render_line(line.rstrip("\n")))
+            if self.capture:
+                self.lines.append(line)
+
+        self.pipe_reader.close()
+
+    def close(self):
+        os.close(self.fd_write)
+
+
 def _ensure_location():
     if not Path("./src").is_dir() or not Path("./.git").is_dir():
-        raise RuntimeError("must be running within the bitcoin git repo")
+        raise die("must be running within the bitcoin git repo")
 
 
 def _github_api(path: str) -> dict:
@@ -112,14 +202,30 @@ def _github_api(path: str) -> dict:
 def _fetch_upstream(prnum: int):
     _sh(
         f"git fetch {UPSTREAM} master +refs/pull/{prnum}/head:refs/{UPSTREAM}/pr/{prnum}",
-        check=True)
+        check=True,
+    )
 
 
-def _sh(cmd: str, check: bool = False) -> str:
+def _sh(cmd: str, check: bool = False, quiet: bool = False) -> str:
     """Run a command and return its stdout."""
     if DEBUG:
         print(f"[cmd] {cmd}", flush=True)
-    return run(cmd, shell=True, stdout=PIPE, check=check).stdout.decode().strip()
+
+    output = OutputStreamer(quiet=quiet, capture=True)
+    kwargs = {}
+    kwargs["stdout"] = output
+    kwargs["stderr"] = output
+    kwargs["shell"] = True
+
+    with subprocess.Popen(cmd, **kwargs) as s:
+        output.close()
+        output.join()
+        returncode = s.wait()
+
+        if returncode != 0 and check:
+            die(f"command failed: {cmd}")
+
+    return "".join(output.lines).strip()
 
 
 class PRData(NamedTuple):
@@ -177,20 +283,28 @@ class TipData(NamedTuple):
     @classmethod
     def from_prdata(cls, prdata: PRData):
         ref = "{}/pr/{}".format(UPSTREAM, prdata.num)
-        tip_sha = _sh("git rev-parse {}".format(ref))
+        tip_sha = _sh("git rev-parse {}".format(ref), quiet=True)
         gotlog = _sh(
             "git log --no-color {}/master..{} --oneline".format(UPSTREAM, ref),
-            check=True)
-        earliest_commit_sha = gotlog.splitlines()[-1] .split()[0]
-        base_sha = _sh("git rev-parse {}~1".format(earliest_commit_sha))
+            check=True,
+            quiet=True,
+        )
+        earliest_commit_sha = gotlog.splitlines()[-1].split()[0]
+        base_sha = _sh("git rev-parse {}~1".format(earliest_commit_sha), quiet=True)
         if len(base_sha) > 40:
-            raise RuntimeError(f"base_sha is fucked: {base_sha[:100]}")
+            raise die(f"base_sha is fucked: {base_sha[:100]}")
 
+        shortsha = tip_sha[:7]
         preexisting_paths = list(prdata.ackr_path.glob("[0-9]*.*"))
         if DEBUG:
             print("Preexisting PR paths: {}".format(preexisting_paths))
 
-        seq = len(preexisting_paths) + 1
+        seq = len(preexisting_paths)
+        already_exists = any(str(p).endswith(shortsha) for p in preexisting_paths)
+
+        if not already_exists:
+            seq += 1
+
         ackr_path = prdata.ackr_path / "{}.{}".format(seq, tip_sha[:7])
 
         return cls(
@@ -206,7 +320,7 @@ class TipData(NamedTuple):
 
 
 @cli.cmd
-def pull(prnum: int):
+def pull(prnum: int = None):
     """
     Given a PR number, retrieve the code from Github and do a few things:
 
@@ -214,8 +328,24 @@ def pull(prnum: int):
     - generate a diff relative to the base of the branch and save it,
     - generate a review checklist with all commits.
     """
-    _sh("git fetch --all", check=True)
-    _fetch_upstream(prnum)
+    _sh(f"git fetch --all", check=True)
+    prnum = prnum or _get_current_pr_num()
+    (tip, changed) = _pull(prnum)
+
+    if changed:
+        print(f"Got new tip: {green(tip.ackr_tag)}")
+        print()
+        print((tip.ackr_path / "review-checklist.md").read_text())
+        print()
+        _sh(f"git checkout {tip.ackr_tag}")
+    else:
+        print("PR up to date ({})".format(tip.tip_sha[:8]))
+
+
+def _pull(prnum: int) -> (TipData, bool):
+    """If a new tag was pulled, return the corresponding tipdata."""
+    prnum = prnum or _get_current_pr_num()
+    _fetch_upstream(prnum or _get_current_pr_num())
     pr = PRData.from_json_dict(
         _github_api("/repos/bitcoin/bitcoin/pulls/" + str(prnum))
     )
@@ -223,9 +353,11 @@ def pull(prnum: int):
     tip = TipData.from_prdata(pr)
 
     def create_tag():
-        if not _sh("git tag | grep {}".format(tip.ackr_tag)).strip():
-            _sh("git tag {} {}".format(tip.ackr_tag, tip.tip_sha))
-            print("Tagged {} with {}".format(tip.tip_sha, tip.ackr_tag))
+        if not _sh("git tag | grep {}".format(tip.ackr_tag), quiet=True).strip():
+            _sh("git tag {} {}".format(tip.ackr_tag, tip.tip_sha), quiet=True)
+            print(
+                f"Pushing new tag " f"{green(tip.ackr_tag)} ({green(tip.tip_sha)})..."
+            )
             _sh("git push --tags")
 
     if DEBUG:
@@ -233,9 +365,8 @@ def pull(prnum: int):
         print("Existing tips found: {}".format(pr.existing_tips()))
 
     if tip.tip_sha in pr.existing_tips():
-        print("PR up to date ({})".format(tip.tip_sha[:8]))
         create_tag()
-        return
+        return (tip, False)
 
     tip.ackr_path.mkdir()
     by_date_name = (
@@ -253,18 +384,16 @@ def pull(prnum: int):
     (tip.ackr_path / "pr.json").write_text(json.dumps(pr.json_data, indent=2))
     (tip.ackr_path / "HEAD").write_text(tip.tip_sha)
     (tip.ackr_path / "base.diff").write_text(
-        _sh("git diff {} {}".format(tip.base_sha, tip.tip_sha))
+        _sh("git diff {} {}".format(tip.base_sha, tip.tip_sha), quiet=True)
     )
     checklist = _sh(
         "git log --no-color --format=oneline --abbrev-commit --no-merges {} "
-        "^upstream/master | tac | sed -e 's/^/- [ ] /g'".format(tip.tip_sha)
+        "^upstream/master | tac | sed -e 's/^/- [ ] /g'".format(tip.tip_sha),
+        quiet=True,
     )
     (tip.ackr_path / "review-checklist.md").write_text(checklist)
 
-    print()
-    print(checklist)
-    print()
-    _sh(f"git checkout {tip.ackr_tag}")
+    return (tip, True)
 
 
 @cli.cmd
@@ -286,7 +415,7 @@ def print_tag_update(tag: str, one: str, two: str):
 ```sh
 $ git range-diff master {tag}.{one} {tag}.{two}
 
-{_sh(f'git range-diff master {tag}.{one} {tag}.{two}')}
+{_sh(f'git range-diff master {tag}.{one} {tag}.{two}', quiet=True)}
 ```
 
 </details>
@@ -308,6 +437,96 @@ def review():
     print(checklist_path)
 
 
+def get_branch_commits(branch: str):
+    """List branch commits, latest first."""
+    branch = branch.split('~', 1)[0]  # nip off foobar~n
+    lines = _sh(
+        "git log --color=never --oneline "
+        f"$(git merge-base {UPSTREAM}/master {branch})..{branch}",
+        quiet=True,
+    )
+    return [i.split()[0] for i in lines.splitlines()]
+
+
+@cli.cmd
+def ls():
+    out = _sh("git tag | grep '^ackr/'", quiet=True)
+    print(out)
+
+
+@cli.cmd
+def to(pr_num: str):
+    _sh(f"git fetch --all", check=True)
+    _pull(pr_num)
+    tags = _get_versions(pr_num)
+
+    if not tags:
+        die(f"no tags found for {pr_num}")
+
+    _sh(f"git checkout {tags[0]}")
+
+
+@cli.cmd
+def start():
+    """
+    Begin review
+
+    If no prnum given, use the current tag.
+    """
+    prnum = _get_current_pr_num()
+    (tip, changed) = _pull(prnum)
+
+    if changed:
+        print(red("Warning: ") + f"this tag is out of date! Latest: {tip.ackr_tag}")
+
+    commits = get_branch_commits(_get_current_ackr_tag())
+    marker = _curr_commit_marker()
+
+    if marker.exists() and (commit := marker.read_text()):
+        assert commit in commits
+        _sh(f'git checkout {commit}')
+        return
+
+    marker.write_text(commits[-1])
+    _sh(f'git checkout {commits[-1]}')
+
+
+def _curr_commit_marker():
+    dir = Path(_get_current_rev_dir())
+    return dir / 'current_commit'
+
+
+@cli.cmd
+def next(move: int = 1):
+    """Move to the next commit in the branch."""
+    commits = list(reversed(get_branch_commits(_get_current_ackr_tag())))
+    marker = _curr_commit_marker()
+
+    if not marker.exists() or not (commit := marker.read_text()):
+        return start(_get_current_pr_num())
+
+    try:
+        idx = commits.index(commit)
+    except ValueError:
+        die(f"commit {commit} not in branch history")
+
+    try:
+        if (i := idx + move) < 0:
+            die(f"at base commit")
+        else:
+            to_commit = commits[i]
+    except IndexError:
+        die(f"index out of range for {commits} (idx: {idx}, move: {move})")
+
+    _sh(f'git checkout {to_commit}')
+    marker.write_text(to_commit)
+
+
+@cli.cmd
+def prev():
+    return next(-1)
+
+
 @cli.cmd
 def revs():
     """Print the rev dirs for the current tag in descending order."""
@@ -326,7 +545,7 @@ def rangediff():
         return
 
     versions = _get_versions()
-    earlier_versions = versions[versions.index(curr_tag) + 1:]
+    earlier_versions = versions[versions.index(curr_tag) + 1 :]
 
     if not earlier_versions:
         die(f"no earlier versions to compare to in {versions}")
@@ -348,10 +567,15 @@ def interdiff():
     run(f"diff -u {prev_rev}/base.diff {rev}/base.diff | {PAGER}", shell=True)
 
 
-def _get_versions():
-    curr_tag = _get_current_ackr_tag()
-    prefix = curr_tag.split('.')[0]
-    all_tags = _sh(f'git tag | grep "^{prefix}\."').splitlines()
+def _get_versions(pr_num=""):
+    """Get ordered tags, latest first."""
+    if pr_num:
+        prefix = f"ackr/{pr_num}"
+    else:
+        curr_tag = _get_current_ackr_tag()
+        prefix = curr_tag.split(".")[0]
+
+    all_tags = _sh(f'git tag | grep "^{prefix}\."', quiet=True).splitlines()
     return sorted(all_tags, reverse=True)
 
 
@@ -363,14 +587,14 @@ def tags():
 
 
 @cli.cmd
-def ack(msg_file: str = ''):
+def ack(msg_file: str = ""):
     """
     Print a signed ACK message and upload it to opentimestamps.
 
     Args:
         msg_file:
     """
-    head_sha = _sh("git rev-parse HEAD", check=True)
+    head_sha = _sh("git rev-parse HEAD", quiet=True, check=True)
     msg = ""
     ackr_dir = _get_current_rev_dir()
     msg_path = Path(ackr_dir) / "ack_message.txt"
@@ -394,18 +618,18 @@ def ack(msg_file: str = ''):
     elif Path(msg_file).is_file():
         msg = Path(msg_file).read_text()
     else:
-        raise RuntimeError(f"bad path given: {msg_file}")
+        die(f"bad path given: {msg_file}")
 
     if f"ACK {head_sha[:6]}" not in msg:
-        raise RuntimeError("message contains incorrect hash")
+        die("message contains incorrect hash")
 
     msg_path.write_text(msg)
     print(f"Wrote ACK message to {msg_path}")
 
-    signing_key = _sh("git config user.signingkey")
+    signing_key = _sh("git config user.signingkey", quiet=True)
 
     if not signing_key:
-        raise RuntimeError("you need to configure git's user.signingkey")
+        die("you need to configure git's user.signingkey")
 
     signed = True
     try:
@@ -454,9 +678,9 @@ Compiler version: {compiler_v}
     print(out)
     print("-" * 80)
 
-    if _sh("which xclip"):
+    if _sh("which wl-copy", quiet=True):
         t = pipes.Template()
-        t.append("xclip -in -selection clipboard", "--")
+        t.append("wl-copy", "--")
         f = t.open("pipefile", "w")
         f.write(out)
         f.close()
@@ -470,7 +694,9 @@ Compiler version: {compiler_v}
 
 def _get_current_ackr_tag() -> str:
     """Get the ackr tag currently associated with the repo's HEAD."""
-    tags = _sh("git name-rev --tags --name-only $(git rev-parse HEAD)").split()
+    tags = _sh(
+        "git name-rev --tags --name-only $(git rev-parse HEAD)", quiet=True
+    ).split()
     ackr_tags = [t for t in tags if "ackr/" in t]
 
     if not ackr_tags:
@@ -487,7 +713,7 @@ def _get_current_pr_num() -> str:
 
 
 def _get_current_tag_data() -> t.Tuple[int, int, str, str]:
-    return _get_current_ackr_tag().split('ackr/')[-1].split('.')
+    return _get_current_ackr_tag().split("ackr/")[-1].split(".")
 
 
 def _get_current_rev_dir() -> str:
@@ -552,7 +778,7 @@ def _parse_configure_log() -> dict:
 
 
 def die(msg: str):
-    print(msg, file=sys.stderr)
+    print(red(bold(msg)), file=sys.stderr)
     sys.exit(1)
 
 
