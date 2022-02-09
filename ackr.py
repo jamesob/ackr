@@ -241,13 +241,20 @@ class PRData(NamedTuple):
     def from_json_dict(cls, d: dict) -> "PRData":
         author = d["user"]["login"]
         hr_id = re.sub(r"[^a-zA-Z0-9]+", "_", d["title"].lower())[:24].strip("_")
+        path = (ACKR_DIR / "{}.{}.{}".format(d["number"], author, hr_id))
+
+        # hr_id may change as authors rename PRs, so reuse that path/hr_id if that's
+        # happened.
+        if (existing := ACKR_DIR.glob(f'{d["number"]}.{author}.*')):
+            path = list(existing)[0]
+            hr_id = path.name.split('.')[-1]
 
         return cls(
             num=d["number"],
             json_data=d,
             author=author,
             hr_id=hr_id,
-            ackr_path=(ACKR_DIR / "{}.{}.{}".format(d["number"], author, hr_id)),
+            ackr_path=path,
         )
 
     def existing_tips(self) -> t.Mapping[str, int]:
@@ -320,7 +327,7 @@ class TipData(NamedTuple):
 
 
 @cli.cmd
-def pull(prnum: int = None):
+def pull(prnum: int):
     """
     Given a PR number, retrieve the code from Github and do a few things:
 
