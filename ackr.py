@@ -245,8 +245,8 @@ class PRData(NamedTuple):
 
         # hr_id may change as authors rename PRs, so reuse that path/hr_id if that's
         # happened.
-        if (existing := ACKR_DIR.glob(f'{d["number"]}.{author}.*')):
-            path = list(existing)[0]
+        if (existing := list(ACKR_DIR.glob(f'{d["number"]}.{author}.*'))):
+            path = existing[0]
             hr_id = path.name.split('.')[-1]
 
         return cls(
@@ -410,13 +410,18 @@ def print_pr_data(prnum: int):
 
 
 @cli.cmd
-def print_tag_update(tag: str, one: str, two: str):
+def print_tag_update(tag: str, one: str, two: str, verbose: bool = False):
     """Print a message including links to a tagged update for your branch."""
     base = f"https://github.com/{ACKR_GH_USER}/bitcoin/tree/{tag}."
     print(f"[`{tag}.{one}`]({base + one}) -> [`{tag}.{two}`]({base + two})")
 
-    print(
-        f"""
+    range_diff_url = (
+        f"https://github.com/{ACKR_GH_USER}/bitcoin/compare/{tag}.{one}..{tag}.{two}")  # noqa
+    print(f"\n[View range diff on GitHub]({range_diff_url})")
+
+    if verbose:
+        print(
+            f"""
 <details><summary>Show range-diff</summary>
 
 ```sh
@@ -426,8 +431,8 @@ $ git range-diff master {tag}.{one} {tag}.{two}
 ```
 
 </details>
-        """
-    )
+            """
+        )
 
 
 @cli.cmd
