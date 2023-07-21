@@ -74,7 +74,7 @@ about your test environment by parsing config.log (`ackr ack --help`).
 
 ## Installation
 
-Requires Python 3.7+.
+Requires Python 3.11+.
 
 ``` sh
 git clone https://github.com/jamesob/ackr.git
@@ -93,3 +93,5 @@ or via environment variables.
 | `storage_dir` | `ACKR_DIR` | Where ackr data (tag information, etc.) is stored | `~/.ackr` |
 | `ghuser` | `ACKR_GH_USER` | Your github username | `jamesob` |
 | `upstream_remote_name` | `ACKR_UPSTREAM` | The name of the git remote corresponding to the bitcoin/bitcoin repo | `upstream` |
+
+If `storage_dir` is a git repo, it will be committed and pushed to automatically.

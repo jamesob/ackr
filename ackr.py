@@ -40,6 +40,7 @@ import logging
 import pprint
 import typing as t
 import re
+import contextlib
 import sys
 import os
 import threading
@@ -52,6 +53,11 @@ import subprocess
 from subprocess import run
 
 from clii import App
+
+
+if sys.version_info < (3, 11):
+    print("Needs Python version >= 3.11", file=sys.stderr)
+    sys.exit(1)
 
 
 cli = App(description=__doc__)
@@ -69,9 +75,9 @@ def get_conf(key: str, envkey: str, default: t.Any):
         readconf = {}
         if ACKR_CONF_PATH.exists():
             readconf = json.loads(ACKR_CONF_PATH.read_text())
-        get_conf.__cached_conf = readconf
+        setattr(get_conf, '__cached_conf', readconf)
 
-    conffile: dict = get_conf.__cached_conf
+    conffile: dict = getattr(get_conf, '__cached_conf')
 
     return os.path.expanduser(os.environ.get(envkey, conffile.get(key, default)))
 
@@ -162,7 +168,7 @@ class OutputStreamer(threading.Thread):
         self.pipe_reader = os.fdopen(self.fd_read)
         self.start()
         self.capture = capture
-        self.lines = []
+        self.lines: list[str] = []
         self.is_stdout = is_stdout
         self.quiet = quiet
 
@@ -201,7 +207,8 @@ def _github_api(path: str) -> dict:
 
 def _fetch_upstream(prnum: int):
     _sh(
-        f"git fetch {UPSTREAM} master +refs/pull/{prnum}/head:refs/{UPSTREAM}/pr/{prnum}",
+        f"git fetch {UPSTREAM} master "
+        f"+refs/pull/{prnum}/head:refs/{UPSTREAM}/pr/{prnum}",
         check=True,
     )
 
@@ -212,7 +219,7 @@ def _sh(cmd: str, check: bool = False, quiet: bool = False) -> str:
         print(f"[cmd] {cmd}", flush=True)
 
     output = OutputStreamer(quiet=quiet, capture=True)
-    kwargs = {}
+    kwargs: dict[str, t.Any] = {}
     kwargs["stdout"] = output
     kwargs["stderr"] = output
     kwargs["shell"] = True
@@ -226,6 +233,12 @@ def _sh(cmd: str, check: bool = False, quiet: bool = False) -> str:
             die(f"command failed: {cmd}")
 
     return "".join(output.lines).strip()
+
+
+def _sh_check(cmd: str) -> bool:
+    """Return True if the command completes successfully."""
+    out = run(cmd, shell=True, capture_output=True)
+    return out.returncode == 0
 
 
 class PRData(NamedTuple):
@@ -272,9 +285,6 @@ class PRData(NamedTuple):
             sha_to_seq[tipsha] = int(seq)
 
         return sha_to_seq
-
-    def next_seq(self) -> int:
-        """Get the next sequence number for a new tip."""
 
 
 class TipData(NamedTuple):
@@ -325,6 +335,42 @@ class TipData(NamedTuple):
             ackr_path=ackr_path,
         )
 
+def _commit_ackr_state(commit_msg: str) -> bool:
+    """If the ackr data directory is a git repo, push it up to its remote."""
+    with contextlib.chdir(ACKR_DIR):
+        # If .ackr dir isn't a git repo, return early.
+        if not _sh_check("git status"):
+            return False
+
+        committed = run(f"git add * && git commit -am '{commit_msg}'", shell=True)
+        if committed.returncode != 0:
+            print("!! failed to commit to ackr data git repo")
+            return False
+
+        print(
+            f"Pushing ackr state commit '{green(commit_msg)}'..."
+        )
+        pushed = run("git push origin master", shell=True)
+        if pushed.returncode != 0:
+            print("!! failed to push to ackr data git repo")
+            return False
+
+        return True
+
+
+def _pull_ackr_state() -> bool:
+    """If the ackr data directory is a git repo, push it up to its remote."""
+    with contextlib.chdir(ACKR_DIR):
+        # If .ackr dir isn't a git repo, return early.
+        if not _sh_check("git status"):
+            return False
+
+        committed = run("git pull origin master", shell=True)
+        if committed.returncode != 0:
+            print("!! failed to pull ackr data git repo")
+            return False
+
+        return True
 
 @cli.cmd
 def pull(prnum: int):
@@ -335,8 +381,9 @@ def pull(prnum: int):
     - generate a diff relative to the base of the branch and save it,
     - generate a review checklist with all commits.
     """
-    _sh(f"git fetch --all", check=True)
-    prnum = prnum or _get_current_pr_num()
+    _pull_ackr_state()
+    _sh("git fetch --all", check=True)
+    prnum = prnum or int(_get_current_pr_num())
     (tip, changed) = _pull(prnum)
 
     if changed:
@@ -345,14 +392,15 @@ def pull(prnum: int):
         print((tip.ackr_path / "review-checklist.md").read_text())
         print()
         _sh(f"git checkout {tip.ackr_tag}")
+        _commit_ackr_state(f'Started review: {_get_current_tag()}')
     else:
         print("PR up to date ({})".format(tip.tip_sha[:8]))
 
 
-def _pull(prnum: int) -> (TipData, bool):
+def _pull(prnum: int) -> tuple[TipData, bool]:
     """If a new tag was pulled, return the corresponding tipdata."""
-    prnum = prnum or _get_current_pr_num()
-    _fetch_upstream(prnum or _get_current_pr_num())
+    prnum = prnum or int(_get_current_pr_num())
+    _fetch_upstream(prnum)
     pr = PRData.from_json_dict(
         _github_api("/repos/bitcoin/bitcoin/pulls/" + str(prnum))
     )
@@ -365,7 +413,7 @@ def _pull(prnum: int) -> (TipData, bool):
             print(
                 f"Pushing new tag " f"{green(tip.ackr_tag)} ({green(tip.tip_sha)})..."
             )
-            _sh("git push --tags")
+            _sh("git push --no-verify --tags")
 
     if DEBUG:
         print("Latest tip is {}".format(tip.tip_sha))
@@ -391,7 +439,8 @@ def _pull(prnum: int) -> (TipData, bool):
     (tip.ackr_path / "pr.json").write_text(json.dumps(pr.json_data, indent=2))
     (tip.ackr_path / "HEAD").write_text(tip.tip_sha)
     (tip.ackr_path / "base.diff").write_text(
-        _sh("git diff {} {}".format(tip.base_sha, tip.tip_sha), quiet=True)
+        _sh("GIT_PAGER=cat git diff --no-color {} {}".format(
+            tip.base_sha, tip.tip_sha), quiet=True)
     )
     checklist = _sh(
         "git log --no-color --format=oneline --abbrev-commit --no-merges {} "
@@ -443,10 +492,12 @@ def review():
     rev_dir = _get_current_rev_dir()
     if not rev_dir:
         die("revdir not detected for HEAD")
+    tag = _get_current_tag()
 
     checklist_path = rev_dir / "review-checklist.md"
     run(f"{EDITOR} {checklist_path}", shell=True)
     print(checklist_path)
+    _commit_ackr_state(f'Review progress on {tag}')
 
 
 def get_branch_commits(branch: str):
@@ -468,8 +519,8 @@ def ls():
 
 @cli.cmd
 def to(pr_num: str):
-    _sh(f"git fetch --all", check=True)
-    _pull(pr_num)
+    _sh("git fetch --all", check=True)
+    _pull(int(pr_num))
     tags = _get_versions(pr_num)
 
     if not tags:
@@ -524,7 +575,7 @@ def next(move: int = 1):
 
     try:
         if (i := idx + move) < 0:
-            die(f"at base commit")
+            die("at base commit")
         else:
             to_commit = commits[i]
     except IndexError:
@@ -566,13 +617,16 @@ def rangediff():
     prev_tag = earlier_versions[0]
 
     input(f"Comparing {curr_tag} to {prev_tag} [enter] ")
-    run(f"git range-diff {UPSTREAM}/master {prev_tag} {curr_tag}", shell=True)
+    cmd = f"git range-diff {UPSTREAM}/master {prev_tag} {curr_tag}"
+    print(cmd)
+    run(cmd, shell=True)
 
 
 @cli.cmd
 def interdiff():
     """
-    Show the diff between ackr's recorded `base.diff` for this tag and the one preceding it.
+    Show the diff between ackr's recorded `base.diff` for this tag and the one
+    preceding it.
     """
     [rev, prev_rev, *_] = _get_ordered_rev_dirs()
     input(f"Comparing {prev_rev} to {rev} [enter] ")
@@ -606,6 +660,7 @@ def ack(msg_file: str = ""):
     Args:
         msg_file:
     """
+    _pull_ackr_state()
     head_sha = _sh("git rev-parse HEAD", quiet=True, check=True)
     msg = ""
     ackr_dir = _get_current_rev_dir()
@@ -701,7 +756,8 @@ Compiler version: {compiler_v}
         print("Signed ACK message copied to clipboard")
 
     print(f"\nRunning git push origin {tag}")
-    _sh(f"git push origin {tag}")
+    _sh(f"git push --no-verify origin {tag}")
+    _commit_ackr_state(f"ACK: {_get_current_tag()}")
 
 
 def _get_current_ackr_tag() -> str:
@@ -724,11 +780,16 @@ def _get_current_pr_num() -> str:
     return num
 
 
-def _get_current_tag_data() -> t.Tuple[int, int, str, str]:
-    return _get_current_ackr_tag().split("ackr/")[-1].split(".")
+def _get_current_tag() -> str:
+    """E.g. 28008.1.sipa.bip324_ciphersuite"""
+    return _get_current_ackr_tag().split("ackr/")[-1]
 
 
-def _get_current_rev_dir() -> str:
+def _get_current_tag_data() -> t.List[str]:
+    return _get_current_tag().split(".")
+
+
+def _get_current_rev_dir() -> Path:
     """Get the ackr state dir associated with the current revision."""
     num, i, *_ = _get_current_tag_data()
     [pr_dir] = [n for n in ACKR_DIR.iterdir() if n.name.startswith("{}.".format(num))]
@@ -737,11 +798,13 @@ def _get_current_rev_dir() -> str:
     return rev_dir
 
 
-def _get_ordered_rev_dirs(num: t.Optional[str] = None) -> str:
+def _get_ordered_rev_dirs(num: t.Optional[str] = None) -> list[Path]:
     """Get the ackr state dir associated with the current revision."""
     num = num or _get_current_pr_num()
     [pr_dir] = [n for n in ACKR_DIR.iterdir() if n.name.startswith("{}.".format(num))]
-    return list(sorted(pr_dir.iterdir(), reverse=True, key=str))
+    return list(sorted(
+        [i for i in pr_dir.iterdir() if re.match(r'\d+\.', i.name)], 
+        reverse=True, key=str))
 
 
 def _parse_configure_log() -> dict:

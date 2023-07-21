@@ -9,15 +9,13 @@ with open('README.md') as readme_file:
 setup(
     author="James O'Beirne",
     author_email='james.obeirne@pm.me',
-    python_requires='>=3.7',
+    python_requires='>=3.11',
     classifiers=[
         'Intended Audience :: Developers',
         'License :: OSI Approved :: MIT License',
         'Natural Language :: English',
         'Programming Language :: Python :: 3',
-        'Programming Language :: Python :: 3.7',
-        'Programming Language :: Python :: 3.8',
-        'Programming Language :: Python :: 3.9',
+        'Programming Language :: Python :: 3.11',
     ],
     description="tools for reviewing Bitcoin Core",
     license="MIT license",
