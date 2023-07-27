@@ -449,6 +449,13 @@ def _pull(prnum: int) -> tuple[TipData, bool]:
     )
     (tip.ackr_path / "review-checklist.md").write_text(checklist)
 
+    # Create an interdiff file if we have a previous revision to compare to.
+    revs = _get_ordered_rev_dirs(str(prnum))
+    if len(revs) >= 2:
+        prev_rev, rev = revs[1], revs[0]
+        interdiff = _get_interdiff(prev_rev, rev)
+        (tip.ackr_path / f"interdiff.{prev_rev.name}.diff").write_text(interdiff)
+
     return (tip, True)
 
 
@@ -633,6 +640,15 @@ def interdiff():
     run(f"diff -u {prev_rev}/base.diff {rev}/base.diff | {PAGER}", shell=True)
 
 
+def _get_interdiff(prev_rev: Path, rev: Path) -> str:
+    out = run(
+        f"diff -u {prev_rev}/base.diff {rev}/base.diff | {PAGER}",
+        shell=True, capture_output=True, text=True)
+    if out.returncode != 0:
+        die("failed to get interdiff")
+    return out.stdout
+
+
 def _get_versions(pr_num=""):
     """Get ordered tags, latest first."""
     if pr_num:
@@ -803,7 +819,7 @@ def _get_ordered_rev_dirs(num: t.Optional[str] = None) -> list[Path]:
     num = num or _get_current_pr_num()
     [pr_dir] = [n for n in ACKR_DIR.iterdir() if n.name.startswith("{}.".format(num))]
     return list(sorted(
-        [i for i in pr_dir.iterdir() if re.match(r'\d+\.', i.name)], 
+        [i for i in pr_dir.iterdir() if re.match(r'\d+\.', i.name)],
         reverse=True, key=str))
 
 
